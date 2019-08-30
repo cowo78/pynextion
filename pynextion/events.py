@@ -1,6 +1,11 @@
-from enum import Enum
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import ctypes
-from .constants import Return
+
+from enum import Enum
+
+from .constants import (Return, S_END_OF_CMD)
 from .exceptions import (
     NexMessageException,
     NexMessageEndException,
@@ -16,16 +21,16 @@ class Event:
 
 
 def hex_disp(msg):
-    return ''.join(['0x%x ' % b for b in msg])
+    return ''.join(('0x%x ' % b for b in msg))
 
 
-def has_end(msg):
-    return msg[-1] == 0xff and msg[-2] == 0xff and msg[-3] == 0xff
+def has_end(msg: bytes):
+    return (len(msg) > 3) and (msg[-3:] == S_END_OF_CMD)
 
 
 def ensure_has_end(msg):
     if not has_end(msg):
-        raise NexMessageEndException("Message %r must end with 0xff 0xff 0xff" % msg)
+        raise NexMessageEndException("Message %r must end with 0xFFFFFF" % msg)
 
 
 class AbstractMsgEvent:
@@ -43,7 +48,8 @@ class AbstractMsgEvent:
     def ensure_has_expected_first_byte(cls, msg, first_byte):
         expected_first_byte = cls.FIRST_BYTE
         if first_byte != expected_first_byte:
-            raise NexMessageFirstByteException("Event message %r must have %d as first byte not %d" % (msg, expected_first_byte, first_byte))
+            raise NexMessageFirstByteException(
+                "Event message %r must have %d as first byte not %d" % (msg, expected_first_byte, first_byte))
 
     def isempty(self):
         return False
@@ -56,16 +62,17 @@ class TouchEvent(AbstractMsgEvent):
     EXPECTED_LENGTH = 7
     FIRST_BYTE = Return.Code.EVENT_TOUCH_HEAD
 
-    code = None
-    pid = None
-    cid = None
-    tevts = None
-
-    def __init__(self, code, pid, cid, tevts):
+    def __init__(self, code, pid, cid, press_event):
         self.code = code
         self.pid = pid
         self.cid = cid
-        self.tevts = tevts
+        self.press_event = press_event
+
+    def __str__(self):
+        return "Touch {0} event - Page {1.pid} - Component {1.cid}".format(
+            "PRESS" if self.press_event is Event.Touch.Press else "RELEASE",
+            self
+        )
 
     @classmethod
     def parse(cls, msg):
@@ -82,9 +89,6 @@ class TouchEvent(AbstractMsgEvent):
 class CurrentPageIDHeadEvent(AbstractMsgEvent):
     EXPECTED_LENGTH = 5
     FIRST_BYTE = Return.Code.CURRENT_PAGE_ID_HEAD
-
-    code = None
-    pid = None
 
     def __init__(self, code, pid):
         self.code = code
@@ -103,11 +107,6 @@ class CurrentPageIDHeadEvent(AbstractMsgEvent):
 class PositionHeadEvent(AbstractMsgEvent):
     EXPECTED_LENGTH = 9
     FIRST_BYTE = Return.Code.EVENT_POSITION_HEAD
-
-    code = None
-    x = None
-    y = None
-    tevts = None
 
     def __init__(self, code, x, y, tevts):
         self.code = code
@@ -131,11 +130,6 @@ class SleepPositionHeadEvent(AbstractMsgEvent):
     EXPECTED_LENGTH = 9
     FIRST_BYTE = Return.Code.EVENT_SLEEP_POSITION_HEAD
 
-    code = None
-    x = None
-    y = None
-    tevts = None
-
     def __init__(self, code, x, y, tevts):
         self.code = code
         self.x = x
@@ -158,9 +152,6 @@ class StringHeadEvent(AbstractMsgEvent):
     EXPECTED_LENGTH = None
     FIRST_BYTE = Return.Code.STRING_HEAD
 
-    code = None
-    value = None
-
     def __init__(self, code, value):
         self.code = code
         self.value = value
@@ -178,10 +169,6 @@ class StringHeadEvent(AbstractMsgEvent):
 class NumberHeadEvent(AbstractMsgEvent):
     EXPECTED_LENGTH = 8
     FIRST_BYTE = Return.Code.NUMBER_HEAD
-
-    code = None
-    value = None
-    signed_value = None
 
     def __init__(self, code, value, signed_value):
         self.code = code
@@ -225,6 +212,11 @@ class EventLaunched(AbstractMsgEvent):
         return EventLaunched()
 
 
+class EventStartup(AbstractMsgEvent):
+    # We don't "parse" this but identify it directly in the loop
+    pass
+
+
 class EmptyMessage(AbstractMsgEvent):
     EXPECTED_LENGTH = 0
     FIRST_BYTE = None
@@ -250,8 +242,7 @@ D_BYTE0_EVENT = {
     Return.Code.NUMBER_HEAD.value: NumberHeadEvent
 }
 
-
-NEX_EXCEPTIONS = [
+NEX_EXCEPTIONS = {
     Return.Code.INVALID_CMD,
     Return.Code.CMD_FINISHED,
     Return.Code.INVALID_COMPONENT_ID,
@@ -267,22 +258,26 @@ NEX_EXCEPTIONS = [
     Return.Code.INVALID_IO,
     Return.Code.INVALID_ESC_CHAR,
     Return.Code.INVALID_VAR_NAME_TOO_LONG
-]
+}
 
 
-class MsgEvent():
+class MsgEvent:
     @classmethod
     def parse(cls, msg):
-        if len(msg) == 0:
+        if not msg:
             return EmptyMessage()
-        else:
-            first_byte = msg[0]
-            if first_byte in D_BYTE0_EVENT:
-                evt_typ = D_BYTE0_EVENT[first_byte]
-                return evt_typ.parse(msg)
-            else:
-                code = Return.Code(first_byte)
-                if code in NEX_EXCEPTIONS:
-                    raise NexMessageException(code)
-                else:
-                    raise NotImplementedError()
+
+        first_byte = msg[0]
+        if first_byte in D_BYTE0_EVENT:
+            evt_typ = D_BYTE0_EVENT[first_byte]
+            return evt_typ.parse(msg)
+
+        code = Return.Code(first_byte)
+        # Unfortunately the "startup" event starts as an INVALID_CMD and must be checked explicitly
+        if code is Return.Code.INVALID_CMD and msg == b'\x00\x00\x00\xFF\xFF\xFF':
+            return EventStartup()
+
+        if code in NEX_EXCEPTIONS:
+            raise NexMessageException(code)
+
+        raise NotImplementedError("Code 0x{:02X} unknown".format(first_byte))
