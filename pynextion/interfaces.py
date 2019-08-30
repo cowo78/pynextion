@@ -1,97 +1,107 @@
-from .constants import (
-    Alignment
-)
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
-from .resources import (
-    Font,
-    Picture
-)
-from .events import Event
+from PyQt5.QtCore import pyqtProperty, pyqtSignal, pyqtSlot
+
+from .commands import GetPropertyCommand, SetPropertyCommand
+from .constants import Alignment
+from .resources import Font, Picture
 
 
-class NxInterface:
-    def _send(self, cmd):
-        return self._nid._nexserial.send(cmd)
+class NxInterface(object):
+    """ Base interface (or, better, mixin) TO BE SUBCLASSED by a NexWidget or subclass """
 
-    def _get_nex_boolean_property(self, prop):
-        name = self._nid.name
-        cmd = "get %s.%s" % (name, prop)
-        return self._nid._nexserial.get_nex_bool_command(cmd)
+    @pyqtSlot()
+    def refresh(self):
+        """ Called by device poller. Responsible of enqueuing commands needed to read interesting variables.
+            It is generally NOT feasible to keep all variables updated on every cycle for performance reasons,
+            so only those that are modified directly by the user should be placed here
+        """
+        if self.REFRESH_VARIABLES:
+            [self._refresh_internal(var) for var in self.REFRESH_VARIABLES]
 
-    def _set_nex_boolean_property(self, prop, value):
-        name = self._nid.name
-        if value:
-            value = 1
-        else:
-            value = 0
-        cmd = "%s.%s=%s" % (name, prop, value)
-        return self._nid._nexserial.set_nex_bool_command(cmd)
+    @pyqtSlot()
+    def onetime_refresh(self):
+        """ Initial variables refresh to update widget status """
+        if self.ONETIME_REFRESH_VARIABLES:
+            [self._refresh_internal(var) for var in self.ONETIME_REFRESH_VARIABLES]
 
-    def _get_nex_number_property(self, prop, signed, bit_size):
-        name = self._nid.name
-        cmd = "get %s.%s" % (name, prop)
-        return self._nid._nexserial.get_nex_number_command(cmd, signed, bit_size)
+    @pyqtSlot()
+    def _refresh_internal(self, property_name: str):
+        # No need to keep a reference to the command
+        command = GetPropertyCommand(self.name, property_name, self._on_get_property_command_successful)
+        self.send_command(command)
 
-    def _set_nex_number_property(self, prop, value):
-        name = self._nid.name
-        cmd = "%s.%s=%s" % (name, prop, value)
-        return self._nid._nexserial.set_nex_number_command(cmd)
-
-    def _get_nex_string_property(self, prop):
-        name = self._nid.name
-        cmd = "get %s.%s" % (name, prop)
-        return self._nid._nexserial.get_nex_string_command(cmd)
-
-    def _set_nex_string_property(self, prop, value):
-        name = self._nid.name
-        cmd = "%s.%s=\"%s\"" % (name, prop, value)
-        return self._nid._nexserial.set_nex_string_command(cmd)
+    @pyqtSlot()
+    def _on_get_property_command_successful(self):
+        command = self.sender()
+        # Usually the data_event uses the "value" attribute, but subclasses may use different stuff, see
+        # INumericalUnsignedValued
+        previous = self._properties_cache.get(command.property_name, None)
+        self._properties_cache[command.property_name] = command.data_event.value
+        if previous != command.data_event.value:
+            self.value_changed.emit(command.data_event.value)
 
 
 class INumericalUnsignedValued(NxInterface):
-    @property
+    value_changed = pyqtSignal(int)
+
+    @pyqtProperty(int)
     def value(self):
-        return self._get_nex_number_property("val", False, 32)
+        return self._properties_cache["val"]
 
     @value.setter
-    def value(self, value):
-        self._set_nex_number_property("val", value)
+    def value(self, value: int):
+        self.send_command(SetPropertyCommand(self.name, "val", value, on_successful=self._on_set_property_command_successful))
+
+    @pyqtSlot(int)
+    def set_value(self, value):
+        self.value = value
+
+    @pyqtSlot()
+    def _on_set_property_command_successful(self):
+        command = self.sender()
+        # Update cache and send value_changed signal
+        previous = self._properties_cache.get(command.property_name, None)
+        self._properties_cache[command.property_name] = command.new_value
+        if previous != command.new_value:
+            self.value_changed.emit(command.new_value)
 
 
-class INumericalSignedValued(NxInterface):
-    @property
-    def value(self):
-        return self._get_nex_number_property("val", True, 32)
-
-    @value.setter
-    def value(self, value):
-        self._set_nex_number_property("val", value)
+class INumericalSignedValued(INumericalUnsignedValued):
+    @pyqtSlot()
+    def _on_get_property_command_successful(self):
+        command = self.sender()
+        # NumberHeadEvent
+        self._properties_cache[command.property_name] = command.data_event.signed_value
 
 
-class IBooleanValued(NxInterface):
-    @property
-    def value(self):
-        # return bool(self.get_nex_number_property("val", False, 32))
-        return self._get_nex_boolean_property("val")
-
-    @value.setter
-    def value(self, value):
-        value = bool(value)
-        self._set_nex_boolean_property("val", value)
+class IBooleanValued(INumericalUnsignedValued):
+    @pyqtSlot()
+    def _on_get_property_command_successful(self):
+        command = self.sender()
+        # NumberHeadEvent
+        self._properties_cache[command.property_name] = bool(command.data_event.value)
 
 
 class IStringValued(NxInterface):
-    @property
+    value_changed = pyqtSignal(str)
+
+    @pyqtProperty(str)
     def text(self):
-        return self._get_nex_string_property("txt")
+        return self._properties_cache["txt"]
 
     @text.setter
     def text(self, value):
-        self._set_nex_string_property("txt", value)
+        self.send_command(SetPropertyCommand(self.name, "txt", value))
+
+    @pyqtSlot(str)
+    def set_text(self, txt):
+        self.text = txt
 
 
 class IColourable(NxInterface):
-    @property
+    @pyqtProperty(int)
     def backcolor(self):
         return self._get_nex_number_property("bco", False, 32)
 
@@ -99,7 +109,7 @@ class IColourable(NxInterface):
     def backcolor(self, color):
         self._set_nex_number_property("bco", color.value)
 
-    @property
+    @pyqtProperty(int)
     def forecolor(self):
         return self._get_nex_number_property("pco", False, 32)
 
@@ -110,9 +120,9 @@ class IColourable(NxInterface):
 
 class AlignmentDirection(NxInterface):
     def __init__(self, nid):
-        self._nid = nid
+        self = nid
 
-    @property
+    @pyqtProperty(int)
     def vertical(self):
         return Alignment.Vertical(self._get_nex_number_property("ycen", False, 32))
 
@@ -121,7 +131,7 @@ class AlignmentDirection(NxInterface):
         assert isinstance(value, Alignment.Vertical), "Argument must be %r" % Alignment.Vertical
         self._set_nex_number_property("ycen", value.value)
 
-    @property
+    @pyqtProperty(int)
     def horizontal(self):
         return Alignment.Horizontal(self._get_nex_number_property("xcen", False, 32))
 
@@ -132,7 +142,7 @@ class AlignmentDirection(NxInterface):
 
 
 class IFontStyleable(NxInterface):
-    @property
+    @pyqtProperty(int)
     def font(self):
         return self._get_nex_number_property("font", False, 32)
 
@@ -141,13 +151,13 @@ class IFontStyleable(NxInterface):
         assert isinstance(value, Font), "Argument must be %r" % Font
         self._set_nex_number_property("font", value.id)
 
-    @property
+    @pyqtProperty(AlignmentDirection)
     def alignment(self):
-        return AlignmentDirection(self._nid)
+        return AlignmentDirection(self)
 
 
 class IPicturable(NxInterface):
-    @property
+    @pyqtProperty(int)
     def picture(self):
         return self._get_nex_number_property("pic", False, 32)
 
@@ -158,14 +168,13 @@ class IPicturable(NxInterface):
 
 
 class IViewable(NxInterface):
-    @property
+    @pyqtProperty(bool)
     def visible(self):
-        oid = self.nid.name
-        return self._send("vis %s" % oid)
+        raise AttributeError("It is not possible to know if a Nextion widget is currently visible")
 
     @visible.setter
     def visible(self, value):
-        oid = self._nid.name
+        oid = self.name
         if value:
             cmd = "vis %s,1" % oid
         else:
@@ -174,7 +183,7 @@ class IViewable(NxInterface):
 
 
 class IHeightable(NxInterface):
-    @property
+    @pyqtProperty(int)
     def height(self):
         return self._get_nex_number_property("hig", False, 32)
 
@@ -184,7 +193,7 @@ class IHeightable(NxInterface):
 
 
 class IWidthable(NxInterface):
-    @property
+    @pyqtProperty(int)
     def width(self):
         return self._get_nex_number_property("wid", False, 32)
 
@@ -194,29 +203,14 @@ class IWidthable(NxInterface):
 
 
 class ITouchable(NxInterface):
-    _callback = None
+    pressed = pyqtSignal()
+    " Emitted whenever the button is pressed "
+    released = pyqtSignal()
+    " Emitted whenever the button is released. WARNING: UNRELIABLE!!! "
 
-    @property
-    def callback(self):
-        return self._callback
+    # TODO: these do not seem to work, I always get an "invalid variable" response
+    def enable_touch_event(self):
+        self._send("tsw {}, 1".format(self.cid or self.name))
 
-    @callback.setter
-    def callback(self, func):
-        print("set callback %s" % func)
-        self._callback = func
-
-    def process_event(self, pid, cid, event_type):
-        assert isinstance(event_type, Event.Touch)
-
-        if pid != self._nid.pid:
-            return False
-
-        if cid != self._nid.cid:
-            return False
-
-        if event_type in [Event.Touch.Press, Event.Touch.Release]:
-            if self.callback is not None:
-                self.callback(self, event_type)
-                return True
-
-        return False
+    def disable_touch_event(self):
+        self._send("tsw {}, 0".format(self.cid or self.name))
