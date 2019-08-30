@@ -1,4 +1,10 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 from enum import Enum
+
+# Serial command/response terminator
+S_END_OF_CMD = b'\xff\xff\xff'
 
 
 class Return:
@@ -76,13 +82,13 @@ class Format(Enum):
 
 
 class Baudrate:
-    SUPPORTED = [2400, 4800, 9600, 19200, 38400, 57600, 115200]
+    SUPPORTED = {2400, 4800, 9600, 19200, 38400, 57600, 115200}
 
     @classmethod
     def _assert_supported(cls, value):
         supported = cls.SUPPORTED
         if value not in supported:
-            raise(Exception("baudrate=%s not in %s" % (value, supported)))
+            raise Exception("baudrate=%s not in %s" % (value, supported))
 
     @classmethod
     def at(cls, value):
